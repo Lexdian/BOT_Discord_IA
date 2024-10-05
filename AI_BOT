@@ -1,0 +1,59 @@
+import discord
+from discord.ext import commands
+import pathlib
+import textwrap
+
+import google.generativeai as genai
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # Carrega as variáveis do arquivo .env
+
+TOKEN = os.getenv('TOKEN')
+API_KEY = os.getenv('API_KEY')
+
+
+
+# Definir os intents necessários
+intents = discord.Intents.default()  # Usa intents padrão
+intents.message_content = True       # Habilita a leitura de conteúdo de mensagens
+
+# Define os comandos do bot
+bot = commands.Bot(command_prefix='!', intents=intents, help_command = None)  # Você pode mudar o prefixo para qualquer outro símbolo
+genai.configure(api_key=API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+@bot.event
+async def on_ready():
+    print(f'Bot conectado como {bot.user}')
+
+# Comando simples que responde 'Pong!' ao digitar '!ping'
+@bot.command()
+async def ping(ctx):
+    await ctx.send('Pong!')
+
+# Comando de ajuda personalizado que também menciona o padrão
+@bot.command(name='help')
+async def help_command(ctx):
+    help_text = (
+        "Aqui estão os comandos disponíveis:\n"
+        "!ping - Responde com 'Pong!'\n"
+        "!help - Mostra esta mensagem de ajuda\n"
+        "!Pergunta... - Responde a pergunta usando a IA do google GEMINI"
+    )
+    await ctx.send(help_text)
+
+import textwrap
+
+@bot.command()
+async def Pergunta(ctx, *, pergunta: str):
+    try:
+        resposta = model.generate_content(pergunta)
+        wrapped_response = textwrap.fill(resposta.text, width=200)  # Ajuste a largura conforme necessário
+        await ctx.send(wrapped_response)
+    except Exception as e:
+        await ctx.send(f"Ocorreu um erro: {str(e)}")
+
+# Iniciar o bot
+bot.run(TOKEN)
