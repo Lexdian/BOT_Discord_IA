@@ -2,117 +2,227 @@ import io
 import re
 import discord
 from discord.ext import commands
-import pathlib
 import textwrap
 from gtts import gTTS
-
-import markdown
-import html2text
-
+import mysql.connector
+from mysql.connector import Error
+from datetime import datetime
 import google.generativeai as genai
-
 import os
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-load_dotenv()  # Carrega as variáveis do arquivo .env
+# Carregar variáveis do ambiente
+load_dotenv()
 
 TOKEN = os.getenv('TOKEN')
 API_KEY = os.getenv('API_KEY')
+HOST = os.getenv('HOST')
+USER = os.getenv('USER')
+PASSWORD = os.getenv('PASSWORD')
+DATABASE = os.getenv('DATABASE')
 
+# Conexão com o banco de dados
+def connectDB():
+    return mysql.connector.connect(
+        host=HOST,
+        user=USER,
+        password=PASSWORD,
+        database=DATABASE
+    )
 
+# Configurações do bot
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.guilds = True
 
-# Definir os intents necessários
-intents = discord.Intents.default()  # Usa intents padrão
-intents.message_content = True       # Habilita a leitura de conteúdo de mensagens
-intents.voice_states = True          # Permite acessar o estado de voz dos membros
-
-# Define os comandos do bot
-bot = commands.Bot(command_prefix='!', intents=intents, help_command = None)  # Você pode mudar o prefixo para qualquer outro símbolo
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-def clean_text(text):
-    # Remove pseudo-código e formatação específica
-    cleaned_text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)  # Remove o bloco da função
-    cleaned_text = re.sub(r'`', '', cleaned_text)  # Remove acentos graves
-    cleaned_text = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned_text)  # Remove asteriscos do texto em negrito
-    cleaned_text = re.sub(r'\(.*?\)', '', cleaned_text)  # Remove parênteses e seu conteúdo
-    cleaned_text = re.sub(r'//.*', '', cleaned_text)  # Remove comentários
-    cleaned_text = re.sub(r'Entrada\(".*?"\)', '', cleaned_text)  # Remove as chamadas de entrada
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)  # Remove espaços extras
-    cleaned_text = re.sub(r'^\s+|\s+$', '', cleaned_text)  # Remove espaços em branco no início e no final
+# Criando o agendador
+scheduler = AsyncIOScheduler()
 
-    return cleaned_text.strip()  # Retorna o texto limpo
-@bot.event
-async def on_ready():
-    print(f'Bot conectado como {bot.user}')
+async def check_daily_lembretes():
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name='lembretes')
+        if channel is None:
+            await guild.create_text_channel("lembretes")
+        channel = discord.utils.get(guild.text_channels, name='lembretes')
+        lembretes = get_and_delete_daily_lembretes(guild.name)
+        if lembretes:
+            await channel.send(lembretes)
+scheduler.add_job(check_daily_lembretes, 'cron', hour = 2)
 
-# Comando simples que responde 'Pong!' ao digitar '!ping'
+
+# Funções de lembretes
+def get_and_delete_daily_lembretes(guild):
+    try:
+        conn = connectDB()
+        cursor = conn.cursor()
+        query = "SELECT criador, mensagem FROM lembretes WHERE data_lembrete = %s AND guild = %s"
+        cursor.execute(query, (datetime.now().date(), guild))
+        lembretes = cursor.fetchall()
+        query = "DELETE FROM lembretes WHERE data_lembrete = %s"
+        cursor.execute(query, (datetime.now().date(),))
+        conn.commit()
+        if lembretes:
+            resposta = "Lista de Lembretes:\n"
+            for criador, mensagem in lembretes:
+                resposta += f"- {criador}: \"{mensagem}\"\n------------------------------\n"
+            return resposta
+    except Error as e:
+        print(f"Erro ao conectar ao banco de dados: {e}")
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
 @bot.command()
-async def ping(ctx):
-    await ctx.send('Pong!')
+async def add_lembrete(ctx, date: str, *, message: str):
+    try:
+        conn = connectDB()
+        cursor = conn.cursor()
+        query = "INSERT INTO lembretes (criador, mensagem, data_lembrete, guild) VALUES (%s, %s, %s, %s)"
+        values = (ctx.author.name, message, date, ctx.guild.name)
+        cursor.execute(query, values)
+        conn.commit()
+        await ctx.send("Lembrete adicionado com sucesso!")
+    except Error as e:
+        print(f"Erro ao conectar ao banco de dados: {e}")
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
 
-# Comando para o bot se conectar ao canal de voz do usuário
+@bot.command()
+async def show_lembretes(ctx):
+    try:
+        conn = connectDB()
+        cursor = conn.cursor()
+        query = "SELECT id, criador, mensagem, data_lembrete FROM lembretes WHERE guild = %s"
+        cursor.execute(query, (ctx.guild.name,))
+        lembretes = cursor.fetchall()
+        if lembretes:
+            resposta = "Lista de Lembretes:\n"
+            for id, criador, mensagem, data_lembrete in lembretes:
+                resposta += f"- {criador}: \"{mensagem}\" em {data_lembrete} com id {id}\n------------------------------\n"
+        else:
+            resposta = "Não há lembretes cadastrados."
+
+        await ctx.send(resposta)
+    except Error as e:
+        print(f"Erro ao conectar ao banco de dados: {e}")
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
+@bot.command()
+async def delete_lembrete(ctx, id):
+    try:
+        conn = connectDB()
+        cursor = conn.cursor()
+        query = "SELECT criador FROM lembretes WHERE id = %s"
+        cursor.execute(query, (id,))
+        creator = cursor.fetchone()
+        if creator:
+            if creator[0] == ctx.author.name:
+                query = "DELETE FROM lembretes WHERE id = %s"
+                cursor.execute(query, (id,))
+                conn.commit()
+                await ctx.send("Lembrete deletado com sucesso!")
+            else:
+                await ctx.send("Apenas o criador do lembrete pode deletá-lo!")
+        else:
+            await ctx.send("Este lembrete não existe!")
+    except Error as e:
+        print(f"Erro ao conectar ao banco de dados: {e}")
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
+# Funções de voz
 @bot.command()
 async def join(ctx):
-    # Verifica se o autor está conectado a um canal de voz
     if ctx.author.voice is None:
         await ctx.send("Você precisa estar em um canal de voz para me fazer conectar.")
-        return False
-
-    # Obtém o canal de voz do autor e faz o bot conectar
+        return
     channel = ctx.author.voice.channel
     await channel.connect()
     await ctx.send(f"Conectado ao canal de voz: {channel}")
-    return True
 
-# Comando para o bot sair do canal de voz
 @bot.command()
 async def leave(ctx):
-    # Verifica se o bot está em um canal de voz
     if ctx.voice_client is None:
         await ctx.send("Não estou conectado a nenhum canal de voz.")
         return
     
     if ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-    # Desconecta o bot
     await ctx.voice_client.disconnect()
     await ctx.send("Desconectado do canal de voz.")
 
-# Comando de ajuda personalizado que também menciona o padrão
-@bot.command(name='help')
-async def help_command(ctx):
-    help_text = (
-        "Aqui estão os comandos disponíveis:\n"
-        "!ping - Responde com 'Pong!'\n"
-        "!help - Mostra esta mensagem de ajuda\n"
-        "!Pergunta... - Responde a pergunta usando a IA do google GEMINI"
-    )
-    await ctx.send(help_text)
-
+# Funções de IA
 @bot.command()
 async def Pergunta(ctx, *, pergunta: str):
     try:
         resposta = model.generate_content(pergunta)
-        wrapped_response = textwrap.fill(resposta.text, width=200)  # Ajuste a largura conforme necessário
+        wrapped_response = textwrap.fill(resposta.text, width=200)
         readable_response = clean_text(wrapped_response)
-        print(readable_response)
-        print("------------------------------------------------")
-        print(wrapped_response)
         await ctx.send(wrapped_response)
+
         if ctx.voice_client is not None:
             tts = gTTS(text=readable_response, lang='pt-br')
             audio_fp = io.BytesIO()
             tts.write_to_fp(audio_fp)
             audio_fp.seek(0)
             if not ctx.voice_client.is_playing():
-                # Toque o áudio
                 ctx.voice_client.play(discord.FFmpegPCMAudio(source=audio_fp, pipe=True), after=lambda e: print("Reprodução concluída"))
             else:
                 await ctx.send("O bot já está tocando um áudio. Aguarde até que a reprodução atual termine.")
     except Exception as e:
         await ctx.send(f"Ocorreu um erro: {str(e)}")
+
+# Funções de utilidade
+def clean_text(text):
+    cleaned_text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    cleaned_text = re.sub(r'`', '', cleaned_text)
+    cleaned_text = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned_text)
+    cleaned_text = re.sub(r'\(.*?\)', '', cleaned_text)
+    cleaned_text = re.sub(r'//.*', '', cleaned_text)
+    cleaned_text = re.sub(r'Entrada\(".*?"\)', '', cleaned_text)
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+    cleaned_text = re.sub(r'^\s+|\s+$', '', cleaned_text)
+    return cleaned_text.strip()
+
+@bot.event
+async def on_ready():
+    print(f'Bot conectado como {bot.user}')
+    check_daily_lembretes()
+    
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        await ctx.send("Esse comando não existe! Tente usar '!help' para ver uma lista dos comandos existentes.")
+
+@bot.command(name='help')
+async def help_command(ctx):
+    help_text = (
+        "Aqui estão os comandos disponíveis:\n"
+        "!help - Mostra esta mensagem de ajuda\n"
+        "!ping - Responde com 'Pong!'\n"
+        "!join - Entra no canal de voz do remetente\n"
+        "!leave - Sai do canal de voz do remetente\n"
+        "!add_lembrete <YYYY-MM-DD> <mensagem> - Adiciona um lembrete\n"
+        "!show_lembretes - Mostra todos os lembretes\n"
+        "!delete_lembrete <id> - Deleta um lembrete pelo ID\n"
+        "!Pergunta <sua pergunta> - Pergunta à IA do Google GEMINI"
+    )
+    await ctx.send(help_text)
 
 # Iniciar o bot
 bot.run(TOKEN)
