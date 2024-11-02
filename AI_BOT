@@ -53,7 +53,6 @@ async def check_daily_lembretes():
         lembretes = get_and_delete_daily_lembretes(guild.name)
         if lembretes:
             await channel.send(lembretes)
-scheduler.add_job(check_daily_lembretes, 'cron', hour = 2)
 
 
 # Funções de lembretes
@@ -81,6 +80,15 @@ def get_and_delete_daily_lembretes(guild):
 
 @bot.command()
 async def add_lembrete(ctx, date: str, *, message: str):
+    date = "".join(num for num in date if num.isdigit())
+    print("Tentando")
+    if len(date) != 8:
+        await ctx.send("Formato de data inválido! Use YYYYMMDD.")
+        return
+    adjusted_Date = datetime.strptime(date, '%Y%m%d').date()
+    if datetime.now().date() > adjusted_Date:
+        await ctx.send("A data inserida já passou!")
+        return
     try:
         conn = connectDB()
         cursor = conn.cursor()
@@ -201,7 +209,12 @@ def clean_text(text):
 @bot.event
 async def on_ready():
     print(f'Bot conectado como {bot.user}')
-    check_daily_lembretes()
+    #await check_daily_lembretes()
+
+    # Adiciona a tarefa ao scheduler e inicia
+    scheduler.add_job(check_daily_lembretes, 'cron', hour = 6, minute = 0, second = 0)
+    if not scheduler.running:
+        scheduler.start()
     
 
 @bot.event
